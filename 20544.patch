@@ -1,0 +1,142 @@
+From 70bd659d85442e1a009a29382e9935ef3c7c6f2a Mon Sep 17 00:00:00 2001
+From: Gert Wollny <gert.wollny@collabora.com>
+Date: Fri, 6 Jan 2023 09:45:11 +0100
+Subject: [PATCH] virgl: Use virgl host side shader stage IDs when reading caps
+
+The ordering of enum pipe_shader_type changed, but not all locations where
+the host uses the original ordering were changed to translate to the new
+ordering, namely reading the shader caps was not fixed up so do this now.
+
+v2: - inline virgl_shader_stage_convert (Corentin)
+    - encapuslate use of host shader stage when reading array elements
+      of host caps
+
+Fixes: a26543f6368fed1604cfde7fffce2024e9d8abab
+   gallium: reorder the shader stage enum to match Mesa
+
+Closes: https://gitlab.freedesktop.org/mesa/mesa/-/issues/8023
+
+Signed-off-by: Gert Wollny <gert.wollny@collabora.com>
+---
+ src/gallium/drivers/virgl/virgl_encode.c | 20 --------------------
+ src/gallium/drivers/virgl/virgl_screen.c | 10 ++++++----
+ src/gallium/drivers/virgl/virgl_screen.h | 22 ++++++++++++++++++++++
+ 3 files changed, 28 insertions(+), 24 deletions(-)
+
+diff --git a/src/gallium/drivers/virgl/virgl_encode.c b/src/gallium/drivers/virgl/virgl_encode.c
+index 7e7e10b6e53d..ea2b138c30dc 100644
+--- a/src/gallium/drivers/virgl/virgl_encode.c
++++ b/src/gallium/drivers/virgl/virgl_encode.c
+@@ -504,26 +504,6 @@ int virgl_encode_rasterizer_state(struct virgl_context *ctx,
+    return 0;
+ }
+ 
+-static enum virgl_shader_stage virgl_shader_stage_convert(enum pipe_shader_type type)
+-{
+-   switch (type) {
+-   case PIPE_SHADER_VERTEX:
+-      return VIRGL_SHADER_VERTEX;
+-   case PIPE_SHADER_TESS_CTRL:
+-      return VIRGL_SHADER_TESS_CTRL;
+-   case PIPE_SHADER_TESS_EVAL:
+-      return VIRGL_SHADER_TESS_EVAL;
+-   case PIPE_SHADER_GEOMETRY:
+-      return VIRGL_SHADER_GEOMETRY;
+-   case PIPE_SHADER_FRAGMENT:
+-      return VIRGL_SHADER_FRAGMENT;
+-   case PIPE_SHADER_COMPUTE:
+-      return VIRGL_SHADER_COMPUTE;
+-   default:
+-      unreachable("virgl: unknown shader stage.\n");
+-   }
+-}
+-
+ static void virgl_emit_shader_header(struct virgl_context *ctx,
+                                      uint32_t handle, uint32_t len,
+                                      uint32_t type, uint32_t offlen,
+diff --git a/src/gallium/drivers/virgl/virgl_screen.c b/src/gallium/drivers/virgl/virgl_screen.c
+index ad92708d8f86..20a038aa087a 100644
+--- a/src/gallium/drivers/virgl/virgl_screen.c
++++ b/src/gallium/drivers/virgl/virgl_screen.c
+@@ -41,7 +41,6 @@
+ #include "virgl_resource.h"
+ #include "virgl_public.h"
+ #include "virgl_context.h"
+-#include "virtio-gpu/virgl_protocol.h"
+ #include "virgl_encode.h"
+ 
+ int virgl_debug = 0;
+@@ -365,6 +364,9 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
+    }
+ }
+ 
++#define VIRGL_SHADER_STAGE_CAP_V2(CAP, STAGE) \
++   vscreen->caps.caps.v2. CAP[virgl_shader_stage_convert(STAGE)]
++
+ static int
+ virgl_get_shader_param(struct pipe_screen *screen,
+                        enum pipe_shader_type shader,
+@@ -430,7 +432,7 @@ virgl_get_shader_param(struct pipe_screen *screen,
+       case PIPE_SHADER_CAP_MAX_CONST_BUFFER0_SIZE:
+          if (vscreen->caps.caps.v2.host_feature_check_version < 12)
+             return 4096 * sizeof(float[4]);
+-         return vscreen->caps.caps.v2.max_const_buffer_size[shader];
++         return VIRGL_SHADER_STAGE_CAP_V2(max_const_buffer_size, shader);
+       case PIPE_SHADER_CAP_MAX_SHADER_BUFFERS:
+          if (shader == PIPE_SHADER_FRAGMENT || shader == PIPE_SHADER_COMPUTE)
+             return vscreen->caps.caps.v2.max_shader_buffer_frag_compute;
+@@ -446,9 +448,9 @@ virgl_get_shader_param(struct pipe_screen *screen,
+       case PIPE_SHADER_CAP_SUPPORTED_IRS:
+          return (1 << PIPE_SHADER_IR_TGSI) | ((virgl_debug & VIRGL_DEBUG_USE_TGSI) ? 0 : (1 << PIPE_SHADER_IR_NIR));
+       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTERS:
+-         return vscreen->caps.caps.v2.max_atomic_counters[shader];
++         return VIRGL_SHADER_STAGE_CAP_V2(max_atomic_counters, shader);
+       case PIPE_SHADER_CAP_MAX_HW_ATOMIC_COUNTER_BUFFERS:
+-         return vscreen->caps.caps.v2.max_atomic_counter_buffers[shader];
++         return VIRGL_SHADER_STAGE_CAP_V2(max_atomic_counter_buffers, shader);
+       case PIPE_SHADER_CAP_INT64_ATOMICS:
+       case PIPE_SHADER_CAP_FP16:
+       case PIPE_SHADER_CAP_FP16_DERIVATIVES:
+diff --git a/src/gallium/drivers/virgl/virgl_screen.h b/src/gallium/drivers/virgl/virgl_screen.h
+index 89d8361e1fa4..ce8a531092ab 100644
+--- a/src/gallium/drivers/virgl/virgl_screen.h
++++ b/src/gallium/drivers/virgl/virgl_screen.h
+@@ -28,6 +28,7 @@
+ #include "util/disk_cache.h"
+ #include "virgl_winsys.h"
+ #include "compiler/nir/nir.h"
++#include "virtio-gpu/virgl_protocol.h"
+ 
+ enum virgl_debug_flags {
+    VIRGL_DEBUG_VERBOSE              = 1 << 0,
+@@ -86,6 +87,27 @@ virgl_has_scanout_format(struct virgl_screen *vscreen,
+                          enum pipe_format format,
+                          bool may_emulate_bgra);
+ 
++static inline enum virgl_shader_stage
++virgl_shader_stage_convert(enum pipe_shader_type type)
++{
++   switch (type) {
++   case PIPE_SHADER_VERTEX:
++      return VIRGL_SHADER_VERTEX;
++   case PIPE_SHADER_TESS_CTRL:
++      return VIRGL_SHADER_TESS_CTRL;
++   case PIPE_SHADER_TESS_EVAL:
++      return VIRGL_SHADER_TESS_EVAL;
++   case PIPE_SHADER_GEOMETRY:
++      return VIRGL_SHADER_GEOMETRY;
++   case PIPE_SHADER_FRAGMENT:
++      return VIRGL_SHADER_FRAGMENT;
++   case PIPE_SHADER_COMPUTE:
++      return VIRGL_SHADER_COMPUTE;
++   default:
++      unreachable("virgl: unknown shader stage.\n");
++   }
++}
++
+ /* GL_ARB_map_buffer_alignment requires 64 as the minimum alignment value.  In
+  * addition to complying with the extension, a high enough alignment value is
+  * expected by various external GL clients. For example, wined3d doesn't like
+-- 
+GitLab
+
